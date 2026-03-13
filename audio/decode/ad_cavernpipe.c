@@ -1,5 +1,5 @@
 /*
- * ad_cavernpipe.c - Raw Stream & Non-Blocking Queue Version
+ * ad_cavernpipe.c - Diagnostic Version with Protocol Fixes
  */
 
 #include <string.h>
@@ -35,6 +35,7 @@ struct cavernpipe_ctx {
     HANDLE hPipe;
     bool connected;
     int channels;
+    int samplerate;
     struct mp_aframe *fmt;
     struct mp_aframe_pool *pool;
     struct mp_decoder public;
@@ -55,7 +56,7 @@ static void close_pipe(struct cavernpipe_ctx *ctx) {
         MP_INFO(ctx, "[PIPE] Closing handle.\n");
         CloseHandle(ctx->hPipe);
     }
-    ctx->hPipe = NULL;
+    ctx->hPipe = INVALID_HANDLE_VALUE;
     ctx->connected = false;
     
     struct queued_packet *curr = ctx->q_head;
@@ -71,31 +72,29 @@ static void close_pipe(struct cavernpipe_ctx *ctx) {
 static int connect_cavernpipe(struct cavernpipe_ctx *ctx) {
     if (ctx->connected) return 0;
 
+    // Soft-check to prevent mpv startup deadlock if server is busy
+    if (!WaitNamedPipeW(CAVERN_PIPE_NAME, 0)) return -1;
+
     ctx->hPipe = CreateFileW(CAVERN_PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 
                              0, NULL, OPEN_EXISTING, 0, NULL);
     
     if (ctx->hPipe == INVALID_HANDLE_VALUE) return -1;
 
-    MP_INFO(ctx, "[PIPE] Connected. Sending Handshake (32-bit Float, 6ch)...\n");
-    
-    // Handshake based on previous successful connections
-    uint8_t handshake[8] = { 32, 24, 6, 0, 64, 0, 0, 0 };
+    // PROTOCOL: Server expects [Int32 SampleRate][Int32 Channels]
+    int32_t handshake[2] = { (int32_t)ctx->samplerate, (int32_t)ctx->channels };
     DWORD written = 0;
     if (!WriteFile(ctx->hPipe, handshake, 8, &written, NULL) || written != 8) {
-        MP_ERR(ctx, "[PIPE] Handshake write failed. Error: %lu\n", GetLastError());
         close_pipe(ctx);
         return -1;
     }
     FlushFileBuffers(ctx->hPipe);
 
-    // CRITICAL: Non-blocking mode prevents mpv from hanging when the pipe backs up
+    // Set to non-blocking mode for processing
     DWORD mode = PIPE_READMODE_BYTE | PIPE_NOWAIT;
-    if (!SetNamedPipeHandleState(ctx->hPipe, &mode, NULL, NULL)) {
-        MP_ERR(ctx, "[PIPE] Failed to set non-blocking mode.\n");
-    }
+    SetNamedPipeHandleState(ctx->hPipe, &mode, NULL, NULL);
 
     ctx->connected = true;
-    MP_INFO(ctx, "[PIPE] Handshake confirmed. Ready for raw streaming.\n");
+    MP_INFO(ctx, "[PIPE] Connected & Handshaked (%dHz/%dch).\n", ctx->samplerate, ctx->channels);
     return 0;
 }
 
@@ -107,69 +106,66 @@ static void cavernpipe_process(struct mp_filter *da) {
         return;
     }
 
-    // --- 1. DRAIN RAW PCM FROM SERVER ---
+    // --- 1. DRAIN PCM FROM SERVER ---
     DWORD avail = 0;
-    // Peek safely tells us how many bytes are ready
-    if (PeekNamedPipe(ctx->hPipe, NULL, 0, NULL, &avail, NULL) && avail >= (ctx->channels * sizeof(float))) {
-        // Calculate how many complete samples we can read (stripping partial floats)
-        uint32_t bytes_to_read = avail - (avail % (ctx->channels * sizeof(float)));
-        int samples = bytes_to_read / (ctx->channels * sizeof(float));
+    while (PeekNamedPipe(ctx->hPipe, NULL, 0, NULL, &avail, NULL) && avail >= 4) {
+        int32_t pcm_len = 0;
+        DWORD read = 0;
         
-        struct mp_aframe *out = mp_aframe_new_ref(ctx->fmt);
-        if (out && mp_aframe_pool_allocate(ctx->pool, out, samples) >= 0) {
-            uint8_t **pdata = mp_aframe_get_data_rw(out);
-            DWORD read = 0;
-            
-            // Read the raw float stream directly into mpv's audio buffer
-            if (ReadFile(ctx->hPipe, pdata[0], bytes_to_read, &read, NULL) && read > 0) {
-                // Adjust frame size in case of a rare partial read
-                samples = read / (ctx->channels * sizeof(float));
-                mp_aframe_set_size(out, samples);
+        // Read the 4-byte length header sent by CavernPipeServer
+        if (ReadFile(ctx->hPipe, &pcm_len, 4, &read, NULL) && read == 4) {
+            if (pcm_len <= 0) continue;
 
-                if (ctx->pts_head != ctx->pts_tail) {
-                    ctx->current_pts = ctx->pts_queue[ctx->pts_head];
-                    ctx->pts_head = (ctx->pts_head + 1) % MAX_PTS_QUEUE;
+            int samples = pcm_len / (ctx->channels * sizeof(float));
+            struct mp_aframe *out = mp_aframe_new_ref(ctx->fmt);
+            
+            if (out && mp_aframe_pool_allocate(ctx->pool, out, samples) >= 0) {
+                uint8_t **pdata = mp_aframe_get_data_rw(out);
+                DWORD total_read = 0;
+
+                // Read the actual PCM payload
+                while (total_read < (DWORD)pcm_len) {
+                    if (ReadFile(ctx->hPipe, pdata[0] + total_read, pcm_len - total_read, &read, NULL)) {
+                        total_read += read;
+                    } else if (GetLastError() != ERROR_NO_DATA) {
+                        break;
+                    }
                 }
-                if (ctx->current_pts != MP_NOPTS_VALUE) {
-                    mp_aframe_set_pts(out, ctx->current_pts);
-                    ctx->current_pts += (double)samples / 48000.0;
+
+                if (total_read == (DWORD)pcm_len) {
+                    if (ctx->pts_head != ctx->pts_tail) {
+                        ctx->current_pts = ctx->pts_queue[ctx->pts_head];
+                        ctx->pts_head = (ctx->pts_head + 1) % MAX_PTS_QUEUE;
+                    }
+                    if (ctx->current_pts != MP_NOPTS_VALUE) {
+                        mp_aframe_set_pts(out, ctx->current_pts);
+                        ctx->current_pts += (double)samples / (double)ctx->samplerate;
+                    }
+
+                    mp_pin_in_write(da->ppins[1], MAKE_FRAME(MP_FRAME_AUDIO, out));
+                    ctx->dbg_pcm_frames_out++;
+
+                    if (ctx->dbg_pcm_frames_out % 50 == 0) {
+                        MP_INFO(ctx, "[FLOW] PCM Frames Out: %llu (Read %d bytes)\n", 
+                                ctx->dbg_pcm_frames_out, pcm_len);
+                    }
+                } else {
+                    talloc_free(out);
                 }
-                
-                mp_pin_in_write(da->ppins[1], MAKE_FRAME(MP_FRAME_AUDIO, out));
-                ctx->dbg_pcm_frames_out++;
-                
-                if (ctx->dbg_pcm_frames_out % 50 == 0) {
-                    MP_INFO(ctx, "[FLOW] PCM Frames Out: %llu (Read %lu bytes)\n", 
-                            ctx->dbg_pcm_frames_out, read);
-                }
-            } else {
-                talloc_free(out);
             }
         }
     }
 
-    // --- 2. FLUSH RAW BITSTREAM QUEUE ---
+    // --- 2. FLUSH BITSTREAM QUEUE ---
     while (ctx->q_head) {
         DWORD written = 0;
-        BOOL success = WriteFile(ctx->hPipe, ctx->q_head->buf, (DWORD)ctx->q_head->size, &written, NULL);
-
-        if (success && written == ctx->q_head->size) {
-            // Entire packet written successfully
+        if (WriteFile(ctx->hPipe, ctx->q_head->buf, (DWORD)ctx->q_head->size, &written, NULL)) {
             struct queued_packet *tmp = ctx->q_head;
             ctx->q_head = ctx->q_head->next;
             if (!ctx->q_head) ctx->q_tail = NULL;
             free(tmp->buf);
             free(tmp);
-        } else if (success && written > 0) {
-            // Partial write: Pipe filled up mid-packet.
-            // Shift the unwritten bytes to the front of the buffer and try again next loop.
-            ctx->q_head->size -= written;
-            memmove(ctx->q_head->buf, ctx->q_head->buf + written, ctx->q_head->size);
-            break; 
-        } else {
-            // Write failed (pipe is totally full right now)
-            break; 
-        }
+        } else break;
     }
 
     // --- 3. INGEST FROM MPV ---
@@ -178,12 +174,16 @@ static void cavernpipe_process(struct mp_filter *da) {
         if (inframe.type == MP_FRAME_PACKET) {
             struct demux_packet *pkt = inframe.data;
             
-            // NO 4-BYTE PREFIX. Sending pure payload.
-            size_t full_size = pkt->len;
+            // PROTOCOL: [Int32 Size][Data] + [Int32 0] (Trigger Render)
+            uint32_t p_len = (uint32_t)pkt->len;
+            uint32_t render_trigger = 0;
+            size_t full_size = 4 + p_len + 4;
+
             uint8_t *send_buf = malloc(full_size);
-            
             if (send_buf) {
-                memcpy(send_buf, pkt->buffer, pkt->len);
+                memcpy(send_buf, &p_len, 4);
+                memcpy(send_buf + 4, pkt->buffer, p_len);
+                memcpy(send_buf + 4 + p_len, &render_trigger, 4);
 
                 if (pkt->pts != MP_NOPTS_VALUE) {
                     ctx->pts_queue[ctx->pts_tail] = pkt->pts;
@@ -191,28 +191,17 @@ static void cavernpipe_process(struct mp_filter *da) {
                 }
 
                 struct queued_packet *qp = malloc(sizeof(struct queued_packet));
-                qp->buf = send_buf; 
-                qp->size = full_size; 
-                qp->next = NULL;
-                
-                if (ctx->q_tail) ctx->q_tail->next = qp; 
-                else ctx->q_head = qp;
+                qp->buf = send_buf; qp->size = full_size; qp->next = NULL;
+                if (ctx->q_tail) ctx->q_tail->next = qp; else ctx->q_head = qp;
                 ctx->q_tail = qp;
-                
+
                 ctx->dbg_packets_in++;
                 if (ctx->dbg_packets_in % 100 == 0) {
                     MP_INFO(ctx, "[FLOW] Atmos Packets In: %llu\n", ctx->dbg_packets_in);
                 }
             }
             talloc_free(pkt);
-        } else if (inframe.type == MP_FRAME_EOF) {
-            MP_INFO(ctx, "[DEBUG] EOF Reached. Sending 0-byte pipeline flush.\n");
-            uint8_t zero = 0;
-            DWORD written;
-            WriteFile(ctx->hPipe, &zero, 1, &written, NULL);
-            mp_pin_in_write(da->ppins[1], inframe);
         } else {
-            MP_INFO(ctx, "[DEBUG] Passing non-packet frame (Type %d)\n", inframe.type);
             mp_pin_in_write(da->ppins[1], inframe);
         }
         mp_filter_internal_mark_progress(da);
@@ -221,8 +210,6 @@ static void cavernpipe_process(struct mp_filter *da) {
 }
 
 static void cavernpipe_reset(struct mp_filter *da) {
-    struct cavernpipe_ctx *ctx = da->priv;
-    if (ctx) MP_INFO(ctx, "[STATE] Filter Reset.\n");
     close_pipe(da->priv);
 }
 
@@ -252,20 +239,20 @@ static struct mp_decoder *cavernpipe_create(struct mp_filter *parent,
     ctx->log = mp_log_new(da, parent->log, NULL);
     ctx->pool = mp_aframe_pool_create(ctx);
     ctx->public.f = da;
+    ctx->hPipe = INVALID_HANDLE_VALUE;
+    
     ctx->channels = 6;
-    ctx->dbg_packets_in = 0;
-    ctx->dbg_pcm_frames_out = 0;
+    ctx->samplerate = 48000;
     
     ctx->fmt = mp_aframe_create();
     mp_aframe_set_format(ctx->fmt, AF_FORMAT_FLOAT); 
-    mp_aframe_set_rate(ctx->fmt, 48000);
+    mp_aframe_set_rate(ctx->fmt, ctx->samplerate);
     
     struct mp_chmap chmap;
-    mp_chmap_from_channels(&chmap, 6); 
+    mp_chmap_from_channels(&chmap, ctx->channels); 
     mp_aframe_set_chmap(ctx->fmt, &chmap);
 
-    MP_INFO(ctx, "[STATE] CavernPipe Filter Initialized (6-channel 5.1).\n");
-
+    MP_INFO(ctx, "[STATE] CavernPipe Filter Initialized.\n");
     return &ctx->public;
 }
 
