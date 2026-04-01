@@ -1,222 +1,128 @@
-![mpv logo](https://raw.githubusercontent.com/mpv-player/mpv.io/master/source/images/mpv-logo-128.png)
+# mpv-cavern
 
-# mpv
+**MPV + CavernPipe** — Real-time Dolby Atmos playback through spatial audio rendering.
 
+This is a modified build of [mpv](https://mpv.io/) (v0.41.0) with an integrated **CavernPipe audio decoder** that sends compressed audio (E-AC-3 / AC-3) to [CavernPipeServer](https://cavern.sbence.hu/) for Dolby Atmos spatial rendering, and receives rendered PCM back for playback.
 
-* [External links](#external-links)
-* [Overview](#overview)
-* [System requirements](#system-requirements)
-* [Downloads](#downloads)
-* [Changelog](#changelog)
-* [Compilation](#compilation)
-* [Release cycle](#release-cycle)
-* [Bug reports](#bug-reports)
-* [Contributing](#contributing)
-* [License](#license)
-* [Contact](#contact)
+TrueHD streams are decoded locally via FFmpeg's built-in decoder.
 
+## Signal Flow
 
-## External links
+```
+Media File (E-AC-3 / AC-3 with Dolby Atmos)
+    ↓
+mpv (ad_cavernpipe decoder)
+    ↓ [compressed frames via Windows named pipe]
+CavernPipeServer (Atmos spatial rendering)
+    ↓ [PCM float32]
+Audio Output (WASAPI / Snapserver / etc.)
+```
 
+For TrueHD:
+```
+Media File (TrueHD)
+    ↓
+mpv (ad_cavernpipe / FFmpeg TrueHD decoder)
+    ↓ [PCM]
+Audio Output
+```
 
-* [Wiki](https://github.com/mpv-player/mpv/wiki)
-* [User Scripts](https://github.com/mpv-player/mpv/wiki/User-Scripts)
-* [FAQ][FAQ]
-* [Manual](https://mpv.io/manual/master/)
+## Supported Codecs
 
+| Codec | Path | Atmos Support |
+|-------|------|---------------|
+| E-AC-3 (Dolby Digital Plus) | CavernPipeServer | ✅ Full JOC/Atmos spatial rendering |
+| AC-3 (Dolby Digital) | CavernPipeServer | ✅ Spatial rendering |
+| TrueHD | FFmpeg (local decode) | ❌ Channel bed only (7.1) |
 
-## Overview
+## Quick Start
 
+### Prerequisites
 
-**mpv** is a free (as in freedom) media player for the command line. It supports
-a wide variety of media file formats, audio and video codecs, and subtitle types.
+- Windows 10/11
+- [.NET 8.0 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (for CavernPipeServer)
 
-There is a [FAQ][FAQ].
+### 1. Start CavernPipeServer
 
-Releases can be found on the [release list][releases].
+```cmd
+CavernPipeServer\CavernPipeServer.exe
+```
 
-## System requirements
+The server creates a Windows named pipe (`\\.\pipe\CavernPipe`) and waits for connections.
 
-- A not too ancient Linux (usually, only the latest releases of distributions
-  are actively supported), Windows 10 1607 or later, or macOS 10.15 or later.
-- A somewhat capable CPU. Hardware decoding might help if the CPU is too slow to
-  decode video in realtime, but must be explicitly enabled with the `--hwdec`
-  option.
-- A not too crappy GPU. mpv's focus is not on power-efficient playback on
-  embedded or integrated GPUs (for example, hardware decoding is not even
-  enabled by default). Low power GPUs may cause issues like tearing, stutter,
-  etc. On such GPUs, it's recommended to use `--profile=fast` for smooth playback.
-  The main video output uses shaders for video rendering and scaling,
-  rather than GPU fixed function hardware. On Windows, you might want to make
-  sure the graphics drivers are current. In some cases, ancient fallback video
-  output methods can help (such as `--vo=xv` on Linux), but this use is not
-  recommended or supported.
+### 2. Play a file with Atmos
 
-mpv does not go out of its way to break on older hardware or old, unsupported
-operating systems, but development is not done with them in mind. Keeping
-compatibility with such setups is not guaranteed. If things work, consider it
-a happy accident.
+```cmd
+build\mpv.exe --ad=cavernpipe "your-atmos-file.mkv"
+```
 
-## Downloads
+Or with verbose logging:
+```cmd
+build\mpv.exe --ad=cavernpipe --no-video -v "your-atmos-file.mkv"
+```
 
+### 3. Play TrueHD (no server needed)
 
-For semi-official builds and third-party packages please see
-[mpv.io/installation](https://mpv.io/installation/).
+```cmd
+build\mpv.exe --ad=cavernpipe "your-truehd-file.mkv"
+```
 
-## Changelog
+## Channel Configuration
 
+The output channel count is read from `%APPDATA%\Cavern\Save.dat` (first line). This is set by the Cavern Driver configuration tool. Default is 6 channels (5.1).
 
-There is no complete changelog; however, changes to the player core interface
-are listed in the [interface changelog][interface-changes].
+To change manually:
+```cmd
+echo 8 > "%APPDATA%\Cavern\Save.dat"
+```
 
-Changes to the C API are documented in the [client API changelog][api-changes].
+Supported: up to 64 channels. For >8 channels, the output uses an "unknown" channel layout to bypass mpv's remixing.
 
-The [release list][releases] has a summary of most of the important changes
-on every release.
+## Building from Source
 
-Changes to the default key bindings are indicated in
-[restore-old-bindings.conf][restore-old-bindings].
+Requires MSYS2 with clang64 toolchain and FFmpeg development libraries.
 
-Changes to the default OSC bindings are indicated in
-[restore-osc-bindings.conf][restore-osc-bindings].
+```bash
+# In MSYS2 clang64 shell
+meson setup build
+meson compile -C build
+```
 
-## Compilation
+### Modified Files
 
+| File | Purpose |
+|------|---------|
+| `audio/decode/ad_cavernpipe.c` | CavernPipe audio decoder (E-AC-3/AC-3 via pipe, TrueHD via FFmpeg) |
+| `filters/f_decoder_wrapper.c` | Decoder selection logic (cavernpipe integration) |
+| `filters/f_decoder_wrapper.h` | Decoder wrapper header |
+| `meson.build` | Build system (includes ad_cavernpipe.c) |
 
-Compiling with full features requires development files for several
-external libraries. Mpv requires [meson](https://mesonbuild.com/index.html)
-to build. Meson can be obtained from your distro or PyPI.
+## CavernPipe Protocol
 
-After creating your build directory (e.g. `meson setup build`), you can view a list
-of all the build options via `meson configure build`. You could also just simply
-look at the `meson_options.txt` file. Logs are stored in `meson-logs` within
-your build directory.
+The named pipe protocol is synchronous:
 
-Example:
+1. **Handshake** (8 bytes): `[BitDepth=32][MandatoryFrames][Channels U16 LE][UpdateRate I32 LE]`
+2. **Send**: `[U32 length LE][compressed audio bytes]`
+3. **Receive**: `[U32 length LE][float32 PCM bytes]`
+4. Repeat 2-3.
 
-    meson setup build
-    meson compile -C build
-    meson install -C build
+## Known Limitations
 
-For libplacebo, meson can use a git check out as a subproject for a convenient
-way to compile mpv if a sufficient libplacebo version is not easily available
-in the build environment. It will be statically linked with mpv. Example:
+- **E-AC-3 with AHT** (Adaptive Hybrid Transform): Not supported by Cavern's decoder — these files will fail.
+- **TrueHD Atmos objects**: FFmpeg decodes the channel bed only (up to 7.1); Atmos spatial metadata is not preserved. Full TrueHD Atmos requires a native MLP decoder in Cavern (not yet implemented).
+- **WASAPI shared mode**: Limited to the device's configured channel count (typically 2 or 8).
+- **One client at a time**: CavernPipeServer accepts a single pipe connection.
 
-    mkdir -p subprojects
-    git clone https://code.videolan.org/videolan/libplacebo.git --depth=1 --recursive subprojects/libplacebo
+## Credits & References
 
-Essential dependencies (incomplete list):
-
-- gcc or clang
-- X development headers (xlib, xrandr, xext, xscrnsaver, xpresent, libvdpau,
-  libGL, GLX, EGL, xv, ...)
-- Audio output development headers (libasound/ALSA, pulseaudio)
-- FFmpeg libraries (libavutil libavcodec libavformat libswscale libavfilter
-  and either libswresample or libavresample)
-- libplacebo
-- zlib
-- iconv (normally provided by the system libc)
-- libass (OSD, OSC, text subtitles)
-- Lua (optional, required for the OSC pseudo-GUI and youtube-dl integration)
-- libjpeg (optional, used for screenshots only)
-- uchardet (optional, for subtitle charset detection)
-- nvdec and vaapi libraries for hardware decoding on Linux (optional)
-
-Libass dependencies (when building libass):
-
-- gcc or clang, nasm on x86 and x86_64
-- fribidi, freetype, fontconfig development headers (for libass)
-- harfbuzz (required for correct rendering of combining characters, particularly
-  for correct rendering of non-English text on macOS, and Arabic/Indic scripts on
-  any platform)
-
-FFmpeg dependencies (when building FFmpeg):
-
-- gcc or clang, nasm on x86 and x86_64
-- OpenSSL or GnuTLS (have to be explicitly enabled when compiling FFmpeg)
-- libx264/libmp3lame/libfdk-aac if you want to use encoding (have to be
-  explicitly enabled when compiling FFmpeg)
-- For native DASH playback, FFmpeg needs to be built with --enable-libxml2
-  (although there are security implications, and DASH support has lots of bugs).
-- AV1 decoding support requires dav1d.
-- For good nvidia support on Linux, make sure nv-codec-headers is installed
-  and can be found by configure.
-
-Most of the above libraries are available in suitable versions on normal
-Linux distributions. For ease of compiling the latest git master of everything,
-you may wish to use the separately available build wrapper ([mpv-build][mpv-build])
-which first compiles FFmpeg libraries and libass, and then compiles the player
-statically linked against those.
-
-If you want to build a Windows binary, see [Windows compilation][windows_compilation].
-
-
-## Release cycle
-
-Once or twice a year, a release is cut off from the current development state
-and is assigned a 0.X.0 version number. No further maintenance is done, except
-in the event of security issues.
-
-The goal of releases is to make Linux distributions happy. Linux distributions
-are also expected to apply their own patches in case of bugs.
-
-Releases other than the latest release are unsupported and unmaintained.
-
-See the [release policy document][release-policy] for more information.
-
-## Bug reports
-
-
-Please use the [issue tracker][issue-tracker] provided by GitHub to send us bug
-reports or feature requests. Follow the template's instructions or the issue
-will likely be ignored or closed as invalid.
-
-Questions can be asked in the [discussions][discussions] or on IRC (see
-[Contact](#Contact) below).
-
-## Contributing
-
-
-Please read [contribute.md][contribute.md].
-
-For small changes you can just send us pull requests through GitHub. For bigger
-changes come and talk to us on IRC before you start working on them. It will
-make code review easier for both parties later on.
-
-You can check [the wiki](https://github.com/mpv-player/mpv/wiki/Stuff-to-do)
-or the [issue tracker](https://github.com/mpv-player/mpv/issues?q=is%3Aopen+is%3Aissue+label%3Ameta%3Afeature-request)
-for ideas on what you could contribute with.
+- **mpv** — Free, open-source media player: [mpv.io](https://mpv.io/) | [GitHub](https://github.com/mpv-player/mpv)
+- **Cavern** — Open-source spatial audio engine by [VoidX (sbence)](https://cavern.sbence.hu/): [GitHub](https://github.com/VoidXH/Cavern)
+- **CavernPipeServer** — Part of the Cavern project, provides real-time Dolby Atmos rendering via named pipe
 
 ## License
 
-GPLv2 "or later" by default, LGPLv2.1 "or later" with `-Dgpl=false`.
-See [details.](https://github.com/mpv-player/mpv/blob/master/Copyright)
+mpv is licensed under GPLv2+ (see [LICENSE.GPL](LICENSE.GPL)) and LGPLv2.1+ (see [LICENSE.LGPL](LICENSE.LGPL)).
 
-## History
+The CavernPipe decoder (`ad_cavernpipe.c`) follows the same license as mpv.
 
-This software is based on the MPlayer project. Before mpv existed as a project,
-the code base was briefly developed under the mplayer2 project. For details,
-see the [FAQ][FAQ].
-
-## Contact
-
-
-Most activity happens on the IRC channel and the GitHub issue tracker.
-
-- **GitHub issue tracker**: [issue tracker][issue-tracker] (report bugs here)
-- **Discussions**: [discussions][discussions]
-- **User IRC Channel**: `#mpv` on `irc.libera.chat`
-- **Developer IRC Channel**: `#mpv-devel` on `irc.libera.chat`
-
-[FAQ]: https://github.com/mpv-player/mpv/wiki/FAQ
-[releases]: https://github.com/mpv-player/mpv/releases
-[mpv-build]: https://github.com/mpv-player/mpv-build
-[issue-tracker]:  https://github.com/mpv-player/mpv/issues
-[discussions]: https://github.com/mpv-player/mpv/discussions
-[release-policy]: https://github.com/mpv-player/mpv/blob/master/DOCS/release-policy.md
-[windows_compilation]: https://github.com/mpv-player/mpv/blob/master/DOCS/compile-windows.md
-[interface-changes]: https://github.com/mpv-player/mpv/blob/master/DOCS/interface-changes.rst
-[api-changes]: https://github.com/mpv-player/mpv/blob/master/DOCS/client-api-changes.rst
-[restore-old-bindings]: https://github.com/mpv-player/mpv/blob/master/etc/restore-old-bindings.conf
-[restore-osc-bindings]: https://github.com/mpv-player/mpv/blob/master/etc/restore-osc-bindings.conf
-[contribute.md]: https://github.com/mpv-player/mpv/blob/master/DOCS/contribute.md
+CavernPipeServer and Cavern libraries are provided under their own license — see the [Cavern repository](https://github.com/VoidXH/Cavern) for details.

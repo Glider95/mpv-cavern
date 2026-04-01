@@ -1,0 +1,108 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "CavernPipeServer/1.0.0": {
+        "dependencies": {
+          "Cavern.Format": "2.1.0",
+          "Cavern.WPF": "2.1.0",
+          "CavernPipeServer.Logic": "1.0.0"
+        },
+        "runtime": {
+          "CavernPipeServer.dll": {}
+        }
+      },
+      "Cavern/2.1.0": {
+        "runtime": {
+          "Cavern.dll": {
+            "assemblyVersion": "0.0.0.0",
+            "fileVersion": "0.0.0.0"
+          }
+        }
+      },
+      "Cavern.Format/2.1.0": {
+        "dependencies": {
+          "Cavern": "2.1.0"
+        },
+        "runtime": {
+          "Cavern.Format.dll": {
+            "assemblyVersion": "0.0.0.0",
+            "fileVersion": "0.0.0.0"
+          }
+        }
+      },
+      "Cavern.QuickEQ/2.1.0": {
+        "dependencies": {
+          "Cavern": "2.1.0"
+        },
+        "runtime": {
+          "Cavern.QuickEQ.dll": {
+            "assemblyVersion": "0.0.0.0",
+            "fileVersion": "0.0.0.0"
+          }
+        }
+      },
+      "Cavern.WPF/2.1.0": {
+        "dependencies": {
+          "Cavern": "2.1.0",
+          "Cavern.Format": "2.1.0",
+          "Cavern.QuickEQ": "2.1.0"
+        },
+        "runtime": {
+          "Cavern.WPF.dll": {
+            "assemblyVersion": "0.0.0.0",
+            "fileVersion": "0.0.0.0"
+          }
+        }
+      },
+      "CavernPipeServer.Logic/1.0.0": {
+        "dependencies": {
+          "Cavern": "2.1.0",
+          "Cavern.Format": "2.1.0"
+        },
+        "runtime": {
+          "CavernPipeServer.Logic.dll": {
+            "assemblyVersion": "0.0.0.0",
+            "fileVersion": "0.0.0.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "CavernPipeServer/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Cavern/2.1.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Cavern.Format/2.1.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Cavern.QuickEQ/2.1.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Cavern.WPF/2.1.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "CavernPipeServer.Logic/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

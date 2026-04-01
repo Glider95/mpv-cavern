@@ -392,6 +392,7 @@ struct mp_decoder_list *audio_decoder_list(void)
 {
     struct mp_decoder_list *list = talloc_zero(NULL, struct mp_decoder_list);
     ad_lavc.add_decoders(list);
+    ad_cavernpipe.add_decoders(list);
     return list;
 }
 
@@ -414,22 +415,31 @@ static bool reinit_decoder(struct priv *p)
         user_list = p->opts->video_decoders;
         fallback = "h264";
     } else if (p->codec->type == STREAM_AUDIO) {
-        driver = &ad_lavc;
-        user_list = p->opts->audio_decoders;
-        fallback = "aac";
+        // Check for custom CavernPipe decoder
+        if (p->opts->audio_decoders &&
+            strstr(p->opts->audio_decoders, "cavernpipe")) {
+            driver = &ad_cavernpipe;
+            // Build decoder list with just cavernpipe
+            list = talloc_zero(NULL, struct mp_decoder_list);
+            mp_add_decoder(list, p->codec->codec, "cavernpipe", "CavernPipe Dolby Atmos");
+        } else {
+            driver = &ad_lavc;
+            user_list = p->opts->audio_decoders;
+            fallback = "aac";
 
-        mp_mutex_lock(&p->cache_lock);
-        bool try_spdif = p->try_spdif;
-        mp_mutex_unlock(&p->cache_lock);
+            mp_mutex_lock(&p->cache_lock);
+            bool try_spdif = p->try_spdif;
+            mp_mutex_unlock(&p->cache_lock);
 
-        if (try_spdif && p->codec->codec) {
-            struct mp_decoder_list *spdif =
-                select_spdif_codec(p->codec->codec, p->opts->audio_spdif);
-            if (spdif->num_entries) {
-                driver = &ad_spdif;
-                list = spdif;
-            } else {
-                talloc_free(spdif);
+            if (try_spdif && p->codec->codec) {
+                struct mp_decoder_list *spdif =
+                    select_spdif_codec(p->codec->codec, p->opts->audio_spdif);
+                if (spdif->num_entries) {
+                    driver = &ad_spdif;
+                    list = spdif;
+                } else {
+                    talloc_free(spdif);
+                }
             }
         }
     }
